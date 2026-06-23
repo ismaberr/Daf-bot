@@ -46,7 +46,7 @@ function downloadFile(url) {
   });
 }
 
-async function analyzeWithClaude(chatId, messageContent) {
+async function analyzeWithClaude(chatId, messageContent, retries = 3) {
   if (!conversations[chatId]) conversations[chatId] = [];
   conversations[chatId].push({ role: 'user', content: messageContent });
 
@@ -54,18 +54,28 @@ async function analyzeWithClaude(chatId, messageContent) {
     conversations[chatId] = conversations[chatId].slice(-20);
   }
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 2000,
-    system: SYSTEM_PROMPT,
-    messages: conversations[chatId],
-  });
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2000,
+        system: SYSTEM_PROMPT,
+        messages: conversations[chatId],
+      });
 
-  const reply = response.content[0].text;
-  conversations[chatId].push({ role: 'assistant', content: reply });
-  return reply;
+      const reply = response.content[0].text;
+      conversations[chatId].push({ role: 'assistant', content: reply });
+      return reply;
+
+    } catch (error) {
+      if (error.status === 529 && i < retries - 1) {
+        await new Promise(res => setTimeout(res, 5000)); // attend 5 secondes
+        continue;
+      }
+      throw error;
+    }
+  }
 }
-
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
 
