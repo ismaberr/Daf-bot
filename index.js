@@ -1,6 +1,7 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const Anthropic = require('@anthropic-ai/sdk');
+const https = require('https');
 
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -34,11 +35,23 @@ Comportement :
 - Signale systématiquement les incohérences ou risques dans les hypothèses présentées
 - Adopte une posture "challenge first, validation second"`;
 
+// Télécharge un fichier depuis Telegram
+function downloadFile(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    });
+  });
+}
+
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   conversations[chatId] = [];
   bot.sendMessage(chatId,
-    `Bonjour ! Je suis ton assistant DAF Aksal 🏦\n\nJe peux t'aider sur :\n• Business Plans & modèles financiers\n• Dossiers de financement bancaire\n• Analyse BFR, TFT, Bilan\n• Fiscalité et réglementation Maroc\n• Structuration intercompany\n\nPose ta question directement.`
+    `Bonjour ! Je suis ton assistant DAF Aksal 🏦\n\nJe peux t'aider sur :\n• Business Plans & modèles financiers\n• Dossiers de financement bancaire\n• Analyse BFR, TFT, Bilan\n• Fiscalité et réglementation Maroc\n• Structuration intercompany\n\n📎 Tu peux aussi m'envoyer directement un fichier PDF ou une image à analyser.\n\nPose ta question directement.`
   );
 });
 
@@ -48,11 +61,111 @@ bot.onText(/\/reset/, (msg) => {
   bot.sendMessage(chatId, 'Conversation réinitialisée ✓');
 });
 
+// Gestion des fichiers PDF et images
+bot.on('document', async (msg) => {
+  const chatId = msg.chat.id;
+  const doc = msg.document;
+  const caption = msg.caption || 'Analyse ce document et donne-moi les points clés dans un contexte DAF.';
+
+  const mimeType = doc.mime_type;
+  const isPDF = mimeType === 'application/pdf';
+  const isImage = mimeType && mimeType.startsWith('image/');
+
+  if (!isPDF && !isImage) {
+    bot.sendMessage(chatId, '⚠️ Format non supporté. Envoie-moi un PDF ou une image (PNG, JPG).\n\nPour les fichiers Excel, fais une capture d\'écran et envoie-la moi.');
+    return;
+  }
+
+  bot.sendChatAction(chatId, 'typing');
+  bot.sendMessage(chatId, '📄 Fichier reçu, analyse en cours...');
+
+  try {
+    const fileInfo = await bot.getFile(doc.file_id);
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+    const fileBuffer = await downloadFile(fileUrl);
+    const base64Data = fileBuffer.toString('base64');
+
+    if (!conversations[chatId]) conversations[chatId] = [];
+
+    const messageContent = isPDF
+      ? [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
+          { type: 'text', text: caption }
+        ]
+      : [
+          { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Data } },
+          { type: 'text', text: caption }
+        ];
+
+    conversations[chatId].push({ role: 'user', content: messageContent });
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2000,
+      system: SYSTEM_PROMPT,
+      messages: conversations[chatId],
+    });
+
+    const reply = response.content[0].text;
+    conversations[chatId].push({ role: 'assistant', content: reply });
+
+    bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error(error);
+    bot.sendMessage(chatId, '❌ Erreur lors de l\'analyse du fichier. Réessaie.');
+  }
+});
+
+// Gestion des images envoyées directement
+bot.on('photo', async (msg) => {
+  const chatId = msg.chat.id;
+  const caption = msg.caption || 'Analyse cette image dans un contexte DAF.';
+  const photo = msg.photo[msg.photo.length - 1]; // Meilleure résolution
+
+  bot.sendChatAction(chatId, 'typing');
+  bot.sendMessage(chatId, '🖼️ Image reçue, analyse en cours...');
+
+  try {
+    const fileInfo = await bot.getFile(photo.file_id);
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+    const fileBuffer = await downloadFile(fileUrl);
+    const base64Data = fileBuffer.toString('base64');
+
+    if (!conversations[chatId]) conversations[chatId] = [];
+
+    const messageContent = [
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Data } },
+      { type: 'text', text: caption }
+    ];
+
+    conversations[chatId].push({ role: 'user', content: messageContent });
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2000,
+      system: SYSTEM_PROMPT,
+      messages: conversations[chatId],
+    });
+
+    const reply = response.content[0].text;
+    conversations[chatId].push({ role: 'assistant', content: reply });
+
+    bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+
+  } catch (error) {
+    console.error(error);
+    bot.sendMessage(chatId, '❌ Erreur lors de l\'analyse de l\'image. Réessaie.');
+  }
+});
+
+// Gestion des messages texte
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
   if (!text || text.startsWith('/')) return;
+  if (msg.document || msg.photo) return;
 
   if (!conversations[chatId]) conversations[chatId] = [];
 
@@ -73,7 +186,6 @@ bot.on('message', async (msg) => {
     });
 
     const reply = response.content[0].text;
-
     conversations[chatId].push({ role: 'assistant', content: reply });
 
     bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
