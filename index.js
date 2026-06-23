@@ -123,7 +123,15 @@ bot.on('message', async (msg) => {
       const caption = msg.caption || 'Analyse ce document PDF dans un contexte DAF et donne-moi les points clés.';
 
       const content = [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } },
+        { 
+          type: 'document', 
+          source: { 
+            type: 'base64', 
+            media_type: 'application/pdf', 
+            data: base64Data 
+          },
+          cache_control: {"type": "ephemeral"}
+        },
         { type: 'text', text: caption }
       ];
 
